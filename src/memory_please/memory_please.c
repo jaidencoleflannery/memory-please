@@ -9,9 +9,10 @@ static void * pool;
 static bool initialized = false;
 
 static size_t pool_used = 0; // per byte.
-static size_t pool_capacity = 16000; // per byte (16kb default).
+static size_t pool_capacity = 16384; // per byte (16kb default).
 
 // linked list is stack based.
+// head nodes are dummy sentinels, tails are literal.
 static memory_segment *used_segments_head;
 static memory_segment *used_segments_tail;
 
@@ -21,14 +22,16 @@ static memory_segment *free_segments_tail;
 static bool scale_pool(size_t scale) {
     void *new_pool = mmap(NULL, (pool_capacity * scale), PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if(new_pool == MAP_FAILED) {
-        LOG("scale_pool: Failed to map memory.");
+        LOG("+ scale_pool: Failed to map memory.\n");
         return false;
     }
 
-    if(initialized) {
-        LOG("scale_pool: Pool was already initialized, copying data to new pool.");
+    if(initialized && pool != NULL) {
+        LOG("+ scale_pool: Pool was already initialized, copying data to new pool.\n");
         memcpy(new_pool, pool, pool_capacity); 
 
+        // following loops clean up dangling pointers.
+        
         memory_segment **free_cursor = &(free_segments_head);
         while(free_cursor != NULL) {
             size_t free_cursor_offset = ((char *)(*free_cursor)->memory - (char *)pool);
@@ -51,12 +54,17 @@ static bool scale_pool(size_t scale) {
             }
         }
 
+        LOG("+ scale_pool: Cleaning up old pool.\n");
         munmap(pool, pool_capacity);
 
     } else {
-        free_segments_head->memory = new_pool;
-        free_segments_tail->memory = new_pool;
-    }
+        LOG("+ scale_pool: Pool was NULL, assigning node pointers to new pool.\n");
+        *free_segments_head = (memory_segment){0};
+        free_segments_tail->memory = free_segments_head->memory = new_pool; 
+
+        *used_segments_head = (memory_segment){0};
+        used_segments_tail->memory = used_segments_head->memory = new_pool; 
+    } 
 
     pool_capacity *= scale;
     pool = new_pool;
@@ -69,12 +77,25 @@ static bool fit_segment(size_t size, void *memory) {
     // check if the requested segment will fit in the existing nodes.
     memory_segment *cursor = free_segments_head;
     while(cursor != NULL) {
-        if((cursor->capacity - cursor->used) >= size) {
-            memory = (cursor + cursor->used);
+        if((cursor->capacity - cursor->used) >= size) { 
+            memory = ((char *)cursor + cursor->used);
+            // heal list.
+            cursor->previous->next = cursor->next;
+            cursor->next->previous = cursor->previous;
+            // add to used.
+            used_segments_tail->next = cursor;
+            cursor->previous = used_segments_tail->next;
+            cursor->next = NULL;
+            used_segments_tail = cursor;
+            
+            cursor->used += size;
+
             return true;
         }
         cursor = cursor->next;
     }
+
+    // else grow used, if pool too small, grow pool.
 
     // get a new node.
     if((pool_used + size) > pool_capacity)
@@ -112,15 +133,15 @@ bool mem_free(memory_segment *segment) {
 bool mem_pls(memory_segment *segment) {
     // if init, init.
     if(pool == NULL) {
-        if(!scale_pool(pool_capacity)) {
-            LOG("\nmem_pls: Failed to scale pool.\n");
+        if(!scale_pool(1)) {
+            LOG("+ mem_pls: Failed to scale pool.\n");
             return false;
         }
     }
     
     // find a slot.
     if(!fit_segment(pool_capacity, segment)) {
-        LOG("\nmem_pls: Failed to fit segment into pool.\n");
+        LOG("+ mem_pls: Failed to fit segment into pool.\n");
         return false;
     }
 
