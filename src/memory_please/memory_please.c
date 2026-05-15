@@ -27,25 +27,35 @@ static bool scale_pool(size_t scale) {
 
     if(initialized) {
         LOG("scale_pool: Pool was already initialized, copying data to new pool.");
-        memcpy(new_pool, pool, pool_capacity);
-        munmap(pool, pool_capacity);
+        memcpy(new_pool, pool, pool_capacity); 
 
         memory_segment **free_cursor = &(free_segments_head);
         while(free_cursor != NULL) {
-            size_t free_cursor_offset = ((char *)*free_cursor - (char *)pool);
-            *free_cursor = (new_pool + free_cursor_offset);
-            free_cursor = (memory_segment **)((*free_cursor)->next);
+            size_t free_cursor_offset = ((char *)(*free_cursor)->memory - (char *)pool);
+            (*free_cursor)->memory = ((char *)new_pool + free_cursor_offset);
+            free_cursor = &(*free_cursor)->next;
+            if((memory_segment **)((*free_cursor)->next) == NULL) {
+                *free_segments_tail = **free_cursor;
+                break;
+            }
         }
 
-        memory_segment **used_cursor = &(free_segments_head);
+        memory_segment **used_cursor = &(used_segments_head);
         while(used_cursor != NULL) {
             size_t used_cursor_offset = ((char *)*used_cursor - (char *)pool);
             *used_cursor = (new_pool + used_cursor_offset); 
-            used_cursor = (memory_segment **)((*used_cursor)->next);
+            used_cursor = &(*used_cursor)->next;
+            if((memory_segment **)((*used_cursor)->next) == NULL) {
+                *used_segments_tail = **used_cursor;
+                break;
+            }
         }
+
+        munmap(pool, pool_capacity);
+
     } else {
-        free_segments_head = new_pool;
-        free_segments_tail = new_pool;
+        free_segments_head->memory = new_pool;
+        free_segments_tail->memory = new_pool;
     }
 
     pool_capacity *= scale;
