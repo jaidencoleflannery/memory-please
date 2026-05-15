@@ -26,7 +26,7 @@ static bool scale_pool(size_t scale) {
     }
 
     if(initialized && pool != NULL) {
-        LOG("+ scale_pool: Pool was already initialized, copying data to new pool.\n");
+        LOG("+ scale_pool: The pool was already initialized, copying data to new pool.\n");
         memcpy(new_pool, pool, pool_capacity); 
 
         // following loops clean up dangling pointers.
@@ -36,10 +36,12 @@ static bool scale_pool(size_t scale) {
             size_t free_cursor_offset = (((char *)*free_cursor) - (char *)pool);
             *free_cursor = (memory_segment *)((char *)new_pool + free_cursor_offset);
             free_cursor = &(*free_cursor)->next;
-            if((*free_cursor)->next == NULL) {
+            if((*free_cursor)->next == NULL) { 
                 *free_segments_tail = **free_cursor;
+                LOG("+ scale_pool: Cleaned up linked list of free nodes.\n");
                 break;
             }
+            LOG("+ scale_pool: Cleanup of free nodes fell through without hitting break, list was not properly re-linked.\n");
         }
 
         memory_segment **used_cursor = &(used_segments_head.next);
@@ -49,15 +51,17 @@ static bool scale_pool(size_t scale) {
             used_cursor = &(*used_cursor)->next;
             if((*used_cursor)->next == NULL) {
                 *used_segments_tail = **used_cursor;
+                LOG("+ scale_pool: Cleaned up linked list of used nodes.\n");
                 break;
             }
+            LOG("+ scale_pool: Cleanup of used nodes fell through without hitting break, list was not properly re-linked.\n");
         }
 
         LOG("+ scale_pool: Cleaning up old pool.\n");
         munmap(pool, pool_capacity);
 
     } else {
-        LOG("+ scale_pool: Pool was NULL, assigning node pointers to new pool.\n");
+        LOG("+ scale_pool: The pool was NULL, assigning node pointers to new pool.\n");
         // capacity of init node is the entire alloc, it has to be broken up per request.
         free_segments_head.next = (memory_segment *)new_pool; 
         *(free_segments_tail = free_segments_head.next) = (memory_segment){
@@ -76,7 +80,7 @@ static bool scale_pool(size_t scale) {
 
 static bool fit_segment(size_t size, void *memory) {
     // check if the requested segment will fit in the existing nodes.
-    // init case is handled by breaking the free segment within the loop.
+    // init instance case is handled by breaking the free segment within the loop.
     memory_segment *cursor = free_segments_head.next;
     while(cursor != NULL) { 
         // if fits, it sits.
@@ -84,12 +88,22 @@ static bool fit_segment(size_t size, void *memory) {
             LOG("+ fit_segment: Eligible free node found.\n");
             // set pointer to that loc.
             memory_segment *segment = cursor;
-            segment->capacity = size;
+            *segment = (memory_segment){
+                .memory = (((char *)segment) + sizeof(memory_segment)),
+                .capacity = size,
+                .used = 0
+            };
 
-            // if slot larger than new segment.
-            if(size < cursor->capacity) {
+            // if slot is some epsilon factor larger than new segment, break it up.
+            // otherwise just give them the whole chunk to avoid fragmentation.
+            if((cursor->capacity - size) > (cursor->capacity * EPSILON)) {
                 LOG("+ fit_segment: Free node larger than size parameter, adjusting tracked nodes.\n");
                 memory_segment *new_free_node = (memory_segment *)((char *)cursor + size);
+                *new_free_node = (memory_segment){
+                    .memory = (((char *)new_free_node) + sizeof(memory_segment)),
+                    .capacity = (cursor->capacity - size),
+                    .used = 0
+                };
 
                 // heal free list.
                 cursor->previous->next = new_free_node;

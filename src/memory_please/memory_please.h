@@ -7,6 +7,8 @@
     #define LOG(input) do { ((void)0); } while(0)
 #endif
 
+#define EPSILON (1.0/3.0)
+
 typedef struct segment {
     struct segment *next;
     struct segment *previous;
