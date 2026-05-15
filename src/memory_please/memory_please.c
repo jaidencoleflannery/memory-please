@@ -11,13 +11,12 @@ static bool initialized = false;
 static size_t pool_used = 0; // per byte.
 static size_t pool_capacity = 16384; // per byte (16kb default).
 
-// linked list is stack based.
 // head nodes are dummy sentinels, tails are literal.
-static memory_segment *used_segments_head;
-static memory_segment *used_segments_tail;
+static memory_segment used_segments_head = {0};
+static memory_segment *used_segments_tail = &used_segments_head;
 
-static memory_segment *free_segments_head;
-static memory_segment *free_segments_tail;
+static memory_segment free_segments_head = {0};
+static memory_segment *free_segments_tail = &free_segments_head;
 
 static bool scale_pool(size_t scale) {
     void *new_pool = mmap(NULL, (pool_capacity * scale), PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
@@ -32,23 +31,23 @@ static bool scale_pool(size_t scale) {
 
         // following loops clean up dangling pointers.
         
-        memory_segment **free_cursor = &(free_segments_head);
+        memory_segment **free_cursor = &(free_segments_head.next);
         while(free_cursor != NULL) {
-            size_t free_cursor_offset = ((char *)(*free_cursor)->memory - (char *)pool);
-            (*free_cursor)->memory = ((char *)new_pool + free_cursor_offset);
+            size_t free_cursor_offset = (((char *)*free_cursor) - (char *)pool);
+            *free_cursor = (memory_segment *)((char *)new_pool + free_cursor_offset);
             free_cursor = &(*free_cursor)->next;
-            if((memory_segment **)((*free_cursor)->next) == NULL) {
+            if((*free_cursor)->next == NULL) {
                 *free_segments_tail = **free_cursor;
                 break;
             }
         }
 
-        memory_segment **used_cursor = &(used_segments_head);
+        memory_segment **used_cursor = &(used_segments_head.next);
         while(used_cursor != NULL) {
             size_t used_cursor_offset = ((char *)*used_cursor - (char *)pool);
-            *used_cursor = (new_pool + used_cursor_offset); 
+            *used_cursor = (memory_segment *)((char *)new_pool + used_cursor_offset); 
             used_cursor = &(*used_cursor)->next;
-            if((memory_segment **)((*used_cursor)->next) == NULL) {
+            if((*used_cursor)->next == NULL) {
                 *used_segments_tail = **used_cursor;
                 break;
             }
@@ -59,11 +58,13 @@ static bool scale_pool(size_t scale) {
 
     } else {
         LOG("+ scale_pool: Pool was NULL, assigning node pointers to new pool.\n");
-        *free_segments_head = (memory_segment){0};
-        free_segments_tail->memory = free_segments_head->memory = new_pool; 
-
-        *used_segments_head = (memory_segment){0};
-        used_segments_tail->memory = used_segments_head->memory = new_pool; 
+        // capacity of init node is the entire alloc, it has to be broken up per request.
+        free_segments_head.next = (memory_segment *)new_pool; 
+        *(free_segments_tail = free_segments_head.next) = (memory_segment){
+            .memory = (new_pool + sizeof(memory_segment)),
+            .capacity = pool_capacity,
+            .used = 0
+        };
     } 
 
     pool_capacity *= scale;
@@ -75,19 +76,41 @@ static bool scale_pool(size_t scale) {
 
 static bool fit_segment(size_t size, void *memory) {
     // check if the requested segment will fit in the existing nodes.
-    memory_segment *cursor = free_segments_head;
-    while(cursor != NULL) {
-        if((cursor->capacity - cursor->used) >= size) { 
-            memory = ((char *)cursor + cursor->used);
-            // heal list.
-            cursor->previous->next = cursor->next;
-            cursor->next->previous = cursor->previous;
-            // add to used.
+    // init case is handled by breaking the free segment within the loop.
+    memory_segment *cursor = free_segments_head.next;
+    while(cursor != NULL) { 
+        // if fits, it sits.
+        if(cursor->capacity >= size) {
+            LOG("+ fit_segment: Eligible free node found.\n");
+            // set pointer to that loc.
+            memory_segment *segment = cursor;
+            segment->capacity = size;
+
+            // if slot larger than new segment.
+            if(size < cursor->capacity) {
+                LOG("+ fit_segment: Free node larger than size parameter, adjusting tracked nodes.\n");
+                memory_segment *new_free_node = (memory_segment *)((char *)cursor + size);
+
+                // heal free list.
+                cursor->previous->next = new_free_node;
+                new_free_node->previous = cursor->previous;
+
+                cursor->next->previous = new_free_node;
+                new_free_node->next = cursor->next;
+
+            } else {
+                // heal free list.
+                cursor->previous->next = cursor->next;
+                cursor->next->previous = cursor->previous;
+            }
+
+            // add to used list.
             used_segments_tail->next = cursor;
             cursor->previous = used_segments_tail->next;
             cursor->next = NULL;
             used_segments_tail = cursor;
             
+            LOG("+ fit_segment: Adjusting size .\n");
             cursor->used += size;
 
             return true;
@@ -95,9 +118,10 @@ static bool fit_segment(size_t size, void *memory) {
         cursor = cursor->next;
     }
 
-    // else grow used, if pool too small, grow pool.
+    // if no free node found, grow used.
+    // if no room, grow pool first.
 
-    // get a new node.
+    // if pool too small, grow pool.
     if((pool_used + size) > pool_capacity)
         scale_pool(pool_capacity * 2);
         
