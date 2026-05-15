@@ -1,26 +1,57 @@
 #include <sys/mman.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 
 #include "./memory_please.h"
 
-static const void *pool;
+static void * pool;
+static bool initialized = false;
 
 static size_t pool_used = 0; // per byte.
-static size_t pool_capacity = 64; // per byte.
+static size_t pool_capacity = 16000; // per byte (16kb default).
 
+// linked list is stack based.
 static memory_segment *used_segments_head;
 static memory_segment *used_segments_tail;
 
 static memory_segment *free_segments_head;
 static memory_segment *free_segments_tail;
 
-static bool scale_pool(size_t scale) { 
-    pool = mmap(NULL, (pool_capacity * scale), PROT_READ | PROT_WRITE, MAP_ANON, -1, 0);
-    if(pool == MAP_FAILED)
+static bool scale_pool(size_t scale) {
+    void *new_pool = mmap(NULL, (pool_capacity * scale), PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if(new_pool == MAP_FAILED) {
+        LOG("scale_pool: Failed to map memory.");
         return false;
+    }
+
+    if(initialized) {
+        LOG("scale_pool: Pool was already initialized, copying data to new pool.");
+        memcpy(new_pool, pool, pool_capacity);
+        munmap(pool, pool_capacity);
+
+        memory_segment **free_cursor = &(free_segments_head);
+        while(free_cursor != NULL) {
+            size_t free_cursor_offset = ((char *)*free_cursor - (char *)pool);
+            *free_cursor = (new_pool + free_cursor_offset);
+            free_cursor = (memory_segment **)((*free_cursor)->next);
+        }
+
+        memory_segment **used_cursor = &(free_segments_head);
+        while(used_cursor != NULL) {
+            size_t used_cursor_offset = ((char *)*used_cursor - (char *)pool);
+            *used_cursor = (new_pool + used_cursor_offset); 
+            used_cursor = (memory_segment **)((*used_cursor)->next);
+        }
+    } else {
+        free_segments_head = new_pool;
+        free_segments_tail = new_pool;
+    }
 
     pool_capacity *= scale;
+    pool = new_pool;
+    initialized = true;
+
     return true;
 }
 
@@ -64,16 +95,24 @@ bool mem_free(memory_segment *segment) {
             prev = cursor;
             cursor = cursor->next;
         }
-    } 
+    }
     return found;
 }
 
-bool mem_pls(size_t size, memory_segment *segment) {
-    if(pool == NULL)
-        scale_pool(pool_capacity);
-        
-    if(!fit_segment(size, segment))
+bool mem_pls(memory_segment *segment) {
+    // if init, init.
+    if(pool == NULL) {
+        if(!scale_pool(pool_capacity)) {
+            LOG("\nmem_pls: Failed to scale pool.\n");
+            return false;
+        }
+    }
+    
+    // find a slot.
+    if(!fit_segment(pool_capacity, segment)) {
+        LOG("\nmem_pls: Failed to fit segment into pool.\n");
         return false;
+    }
 
     return true;
 }
