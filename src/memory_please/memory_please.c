@@ -18,6 +18,10 @@ static memory_segment *used_segments_tail = &used_segments_head;
 static memory_segment free_segments_head = {0};
 static memory_segment *free_segments_tail = &free_segments_head;
 
+/*
+ * NEED TO MAKE IT SO ALL FUNCS RETURN/DEAL WITH memory_segment NOT VOID * !!!
+ */
+
 static bool scale_pool(size_t scale) {
     void *new_pool = mmap(NULL, (pool_capacity * scale), PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if(new_pool == MAP_FAILED) {
@@ -113,23 +117,25 @@ static bool fit_segment(size_t size, void *memory) {
                 new_free_node->next = cursor->next;
 
             } else {
+                LOG("+ fit_segment: Free node was of similar size, giving entire free node.\n");
+                segment->capacity = cursor->capacity;
                 // heal free list.
                 cursor->previous->next = cursor->next;
                 cursor->next->previous = cursor->previous;
             }
 
             // add to used list.
-            used_segments_tail->next = cursor;
-            cursor->previous = used_segments_tail->next;
-            cursor->next = NULL;
+            used_segments_tail->next = segment;
+            segment->previous = used_segments_tail;
             used_segments_tail = cursor;
+            segment->next = NULL;  
             
-            LOG("+ fit_segment: Adjusting size .\n");
-            cursor->used += size;
+            LOG("+ fit_segment: Adjusting size.\n");
+            segment->used += size;
 
             return true;
         }
-        cursor = cursor->next;
+        cursor = cursor->next; 
     }
 
     // if no free node found, grow used.
@@ -141,6 +147,7 @@ static bool fit_segment(size_t size, void *memory) {
         
     memory_segment* new_segment = (memory_segment *)((char *)used_segments_tail + sizeof(memory_segment) + (used_segments_tail->capacity));
     used_segments_tail->next = new_segment;
+    new_segment->previous = used_segments_tail;
     used_segments_tail = new_segment;
 
     return true;
@@ -149,9 +156,13 @@ static bool fit_segment(size_t size, void *memory) {
 
 bool mem_free(memory_segment *segment) {
     bool found = false;
-    memory_segment *cursor = used_segments_head;
+    memory_segment *cursor = &used_segments_head;
     memory_segment *prev = NULL;
-    // sacrifice speed for memory and just store the prev pointer so this is O(1)?
+
+    // heal used list.
+    segment->previous->next = segment->next;
+    segment->next->previous = segment->previous;
+
     while(cursor != NULL) {
         if(cursor == segment) {
             found = true;
